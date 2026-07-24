@@ -139,37 +139,94 @@ describe('priceTokens', () => {
     expect(priceTokens(t, 'totally-unknown-model', tokens)).toBeNull();
   });
 
-  it('prices with the latest CSV history row effective on the event day', async () => {
-    const dir = await makeTempDir();
-    const csv = path.join(dir, 'prices-history.csv');
-    writeFileSync(
-      csv,
-      [
-        'modelId,displayName,effectiveFrom,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
-        'claude-opus-4-8,old-opus,2026-01-01,10,20,30,40',
-        'claude-opus-4-8,new-opus,2026-03-01,1,2,3,4',
-      ].join('\n'),
-      'utf8',
-    );
-    const history = loadPriceHistory(csv);
+  it('prices with the latest in-memory history row effective on the event day', () => {
+    const history = {
+      'claude-opus-4-8': [
+        {
+          modelId: 'claude-opus-4-8',
+          displayName: 'old-opus',
+          effectiveFrom: '2026-01-01',
+          inputPerMTok: '10',
+          outputPerMTok: '20',
+          cacheWritePerMTok: '30',
+          cacheReadPerMTok: '40',
+        },
+        {
+          modelId: 'claude-opus-4-8',
+          displayName: 'new-opus',
+          effectiveFrom: '2026-03-01',
+          inputPerMTok: '1',
+          outputPerMTok: '2',
+          cacheWritePerMTok: '3',
+          cacheReadPerMTok: '4',
+        },
+      ],
+    };
 
+    const beforeFirstEffectiveDate = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2025-12-31T23:59:59.999Z'),
+    });
     const beforeChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
       history,
       ts: Date.parse('2026-02-15T12:00:00.000Z'),
     });
-    const afterChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+    const onChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
       history,
       ts: Date.parse('2026-03-01T00:00:00.000Z'),
     });
+    const afterChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2026-04-15T12:00:00.000Z'),
+    });
 
+    // Before any effective history row, the current table card is the fallback.
+    expect(beforeFirstEffectiveDate!.input).toBe(5_000_000_000n);
+    expect(beforeFirstEffectiveDate!.output).toBe(50_000_000_000n);
     expect(beforeChange!.input).toBe(10_000_000_000n);
     expect(beforeChange!.output).toBe(40_000_000_000n);
     expect(beforeChange!.cacheWrite).toBe(12_000_000_000n);
     expect(beforeChange!.cacheRead).toBe(400_000_000_000n);
-    expect(afterChange!.input).toBe(1_000_000_000n);
-    expect(afterChange!.output).toBe(4_000_000_000n);
-    expect(afterChange!.cacheWrite).toBe(1_200_000_000n);
-    expect(afterChange!.cacheRead).toBe(40_000_000_000n);
+    expect(onChange!.input).toBe(1_000_000_000n);
+    expect(onChange!.output).toBe(4_000_000_000n);
+    expect(onChange!.cacheWrite).toBe(1_200_000_000n);
+    expect(onChange!.cacheRead).toBe(40_000_000_000n);
+    expect(afterChange).toEqual(onChange);
+  });
+
+  it('keeps longest-prefix matching when dated raw models use historical prices', () => {
+    const history = {
+      'claude-opus-4': [
+        {
+          modelId: 'claude-opus-4',
+          displayName: 'base',
+          effectiveFrom: '2026-01-01',
+          inputPerMTok: '100',
+          outputPerMTok: '100',
+        },
+      ],
+      'claude-opus-4-8': [
+        {
+          modelId: 'claude-opus-4-8',
+          displayName: 'suffix',
+          effectiveFrom: '2026-01-01',
+          inputPerMTok: '1',
+          outputPerMTok: '1',
+        },
+      ],
+    };
+
+    const cost = priceTokens(
+      t,
+      'claude-opus-4-8-20260115',
+      { input: 1_000_000, output: 0, cacheWrite: 0, cacheRead: 0 },
+      {
+        history,
+        ts: Date.parse('2026-02-01T00:00:00.000Z'),
+      },
+    );
+
+    expect(cost!.input).toBe(1_000_000_000n);
   });
 
   it('uses current table from currentEffectiveFrom even when bundled history has later rows', async () => {
