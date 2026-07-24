@@ -42,7 +42,9 @@ mkdirSync(outDir, { recursive: true });
 
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 const prices = readFileSync(path.join(root, 'prices', 'prices.json'), 'utf8');
-JSON.parse(prices); // fail fast on a corrupt table rather than baking it in
+const priceHistory = readFileSync(path.join(root, 'prices', 'prices-history.json'), 'utf8');
+JSON.parse(prices);
+JSON.parse(priceHistory); // fail fast on a corrupt table rather than baking it in
 
 // 1. Bundle to a single CJS file. import.meta.url is rewritten to a shim
 //    declared in the banner; the banner also embeds version + price table
@@ -50,6 +52,7 @@ JSON.parse(prices); // fail fast on a corrupt table rather than baking it in
 const banner = [
   `globalThis.__vibebillVersion = ${JSON.stringify(pkg.version)};`,
   `globalThis.__vibebillBundledPrices = ${prices};`,
+  `globalThis.__vibebillBundledPriceHistory = ${priceHistory};`,
   `const __VIBEBILL_IMU__ = require('node:url').pathToFileURL(__filename).href;`,
 ].join('\n');
 const bundle = path.join(outDir, 'bundle.cjs');
@@ -106,7 +109,8 @@ function resolveTargetNode() {
   return nodePath;
 }
 
-const platTag = { darwin: 'macos', linux: 'linux', win32: 'windows' }[process.platform] ?? process.platform;
+const platTag =
+  { darwin: 'macos', linux: 'linux', win32: 'windows' }[process.platform] ?? process.platform;
 const ext = process.platform === 'win32' ? '.exe' : '';
 const binName = `vibebill-${platTag}-${process.arch}${ext}`;
 const binPath = path.join(outDir, binName);
@@ -127,7 +131,9 @@ if (process.platform === 'darwin') {
 // 4. Smoke: the binary must report the packaged version.
 const reported = execFileSync(binPath, ['--version'], { encoding: 'utf8' }).trim();
 if (reported !== pkg.version) {
-  console.error(`smoke failed: binary reports ${JSON.stringify(reported)}, expected ${pkg.version}`);
+  console.error(
+    `smoke failed: binary reports ${JSON.stringify(reported)}, expected ${pkg.version}`,
+  );
   process.exit(1);
 }
 console.log(`built ${path.relative(root, binPath)} (${reported}, node ${process.version})`);

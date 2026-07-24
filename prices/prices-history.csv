@@ -1,0 +1,2 @@
+modelId,displayName,effectiveFrom,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok
+# Add historical pricing changes here. The row with the latest effectiveFrom on or before an event date wins.
