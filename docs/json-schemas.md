@@ -25,7 +25,7 @@ share `schemaVersion: 1`; breaking changes bump it.
   "vibebill": "0.2.0",
   "repoRoot": "/abs/path",
   "plan": null,                      // "pro" | "max5" | "max20" | null
-  "pricing": { "asOf": "2026-07-14", "origin": "bundled" }, // origin: bundled | refreshed
+  "pricing": { "asOf": "2026-07-14", "origin": "refreshed", "sources": [{ "origin": "bundled" }, { "origin": "refreshed", "effectiveFrom": "2026-07-14" }] }, // sources present only when rows can differ by source
   "invariant": {                     // token-conservation check (spec §1.3)
     "ok": true,
     "totalTokens": 123,              // raw ingest ground truth

@@ -214,19 +214,21 @@ export interface PriceCard { displayName: string; inputPerMTok: string; outputPe
 export interface PriceTable { schemaVersion: 1; asOf: string; source: string; models: Record<string, PriceCard>; }
 /** zod-validate and load the bundled prices/prices.json (resolved relative to this module). */
 export function loadBundledPrices(): PriceTable;
-/** User-refreshed table at ~/.config/vibebill/prices.json wins over bundled; report which. */
-export function loadEffectivePrices(opts?: { configDir?: string }): { table: PriceTable; origin: 'bundled' | 'refreshed'; path: string };
+/** User-refreshed table is current only from table.asOf; bundled history covers older dates. */
+export interface EffectivePriceSource { origin: 'bundled' | 'refreshed'; path: string; effectiveFrom?: string; }
+export function loadEffectivePrices(opts?: { configDir?: string }): { table: PriceTable; history: PriceHistory; origin: 'bundled' | 'refreshed'; path: string; sources: EffectivePriceSource[]; warnings: string[] };
 /** Longest-prefix match of raw model string against table keys; null when unknown. */
 export function matchModel(table: PriceTable, rawModel: string): { id: string; card: PriceCard } | null;
 /** Resolve a card to exact nano-USD units; missing cache prices fall back to inputPerMTok with a flag. */
 export function resolveCard(card: PriceCard): { nano: PriceCardNano; cacheFallback: boolean };
 /** Price one event's tokens; null when model unknown (caller records the unknown model). */
-export function priceTokens(table: PriceTable, rawModel: string, tokens: TokenCounts): MoneyBreakdown | null;
+export function priceTokens(table: PriceTable, rawModel: string, tokens: TokenCounts, opts?: { ts?: number; history?: PriceHistory; currentEffectiveFrom?: string }): MoneyBreakdown | null;
 /** THE ONLY NETWORK CALL: fetch LiteLLM table, convert, validate, write user table. */
 export async function refreshPricing(opts?: { configDir?: string; fetchImpl?: typeof fetch }): Promise<{ path: string; asOf: string; modelCount: number }>;
 ```
 Conversion in refreshPricing mirrors the build-time conversion (per-token → $/MTok decimal
 strings, models absent omitted); include Anthropic/OpenAI/Gemini/DeepSeek/Qwen-coder sets.
+Precedence rule: **Option A**. A valid user-refreshed table does not erase bundled history; it is effective only for usage on or after its `asOf` UTC date. Usage before that date resolves against bundled `prices-history.json`, falling back to the loaded table only when no historical row applies. User-supplied `prices-history.json` or `prices-history.csv` files in the config directory are ignored; invalid or ambiguous files produce warnings and the bundled history remains authoritative.
 On any error: throw CliUserError with "kept last known table (asOf ...)" wording handled
 by the CLI. Never auto-refresh.
 

@@ -35,6 +35,7 @@ import { enumerateCommits, resolveRepoRoot, revList } from '../git/index.js';
 import {
   loadEffectivePrices,
   priceTokens,
+  type EffectivePriceSource,
   type PriceHistory,
   type PriceTable,
 } from '../pricing/engine.js';
@@ -94,6 +95,7 @@ export interface CliContext {
     history: PriceHistory;
     origin: 'bundled' | 'refreshed';
     path: string;
+    sources: EffectivePriceSource[];
   };
   /** Full commit enumeration (HEAD or --all-refs), newest first. */
   commits: CommitInfo[];
@@ -267,6 +269,7 @@ export async function buildContext(
       cost: priceTokens(prices.table, event.model, event.tokens, {
         history: prices.history,
         ts: event.ts,
+        currentEffectiveFrom: prices.table.asOf,
       }),
       provenance: provenanceFor(a),
     };
@@ -304,6 +307,7 @@ export async function buildContext(
       history: prices.history,
       origin: prices.origin,
       path: prices.path,
+      sources: prices.sources,
     },
     commits,
     commitByHash,
