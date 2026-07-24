@@ -171,6 +171,30 @@ describe('priceTokens', () => {
     expect(afterChange!.cacheWrite).toBe(1_200_000_000n);
     expect(afterChange!.cacheRead).toBe(40_000_000_000n);
   });
+
+  it('uses current table from currentEffectiveFrom even when bundled history has later rows', async () => {
+    const dir = await makeTempDir();
+    const csv = path.join(dir, 'prices-history.csv');
+    writeFileSync(
+      csv,
+      [
+        'modelId,displayName,effectiveFrom,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
+        'claude-opus-4-8,old-opus,2026-01-01,10,20,30,40',
+        'claude-opus-4-8,new-opus,2026-08-01,1,2,3,4',
+      ].join('\n'),
+      'utf8',
+    );
+    const history = loadPriceHistory(csv);
+
+    const cost = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2026-08-15T12:00:00.000Z'),
+      currentEffectiveFrom: '2026-07-14',
+    });
+
+    expect(cost!.input).toBe(5_000_000_000n);
+    expect(cost!.output).toBe(50_000_000_000n);
+  });
 });
 
 describe('repriceTokens', () => {
@@ -288,6 +312,31 @@ describe('loadEffectivePrices', () => {
     expect(origin).toBe('refreshed');
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('futureField');
+  });
+
+  it('encodes mixed bundled-history/refreshed-current sources', async () => {
+    const configDir = await makeTempDir();
+    const userPath = writeUserTable(
+      configDir,
+      JSON.stringify(table({ 'claude-opus-4-8': OPUS_4_8 })),
+    );
+    const { sources } = loadEffectivePrices({ configDir });
+    expect(sources).toEqual([
+      expect.objectContaining({ origin: 'bundled' }),
+      { origin: 'refreshed', path: userPath, effectiveFrom: '2026-07-14' },
+    ]);
+  });
+
+  it('warns and ignores user historical pricing files', async () => {
+    const configDir = await makeTempDir();
+    const dir = path.join(configDir, 'vibebill');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'prices-history.json'), '{ bad json', 'utf8');
+    const { origin, warnings } = loadEffectivePrices({ configDir });
+    expect(origin).toBe('bundled');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('user historical pricing file');
+    expect(warnings[0]).toContain('using bundled history');
   });
 });
 

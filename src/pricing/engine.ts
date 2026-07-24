@@ -173,13 +173,29 @@ export function loadBundledPrices(): PriceTable {
  * The env override exists for the same reason as VIBEBILL_CLAUDE_DIR
  * (spec §10): relocation and hermetic tests.
  */
-function userPricesPath(configDir?: string): string {
-  const base =
+function userConfigBase(configDir?: string): string {
+  return (
     configDir ??
     (process.env['VIBEBILL_CONFIG_DIR'] !== undefined && process.env['VIBEBILL_CONFIG_DIR'] !== ''
       ? process.env['VIBEBILL_CONFIG_DIR']
-      : path.join(homedir(), '.config'));
-  return path.join(base, 'vibebill', 'prices.json');
+      : path.join(homedir(), '.config'))
+  );
+}
+
+function userPricesPath(configDir?: string): string {
+  return path.join(userConfigBase(configDir), 'vibebill', 'prices.json');
+}
+
+function userHistoryPaths(configDir?: string): string[] {
+  const dir = path.join(userConfigBase(configDir), 'vibebill');
+  return [path.join(dir, 'prices-history.json'), path.join(dir, 'prices-history.csv')];
+}
+
+export interface EffectivePriceSource {
+  origin: 'bundled' | 'refreshed';
+  path: string;
+  /** Inclusive YYYY-MM-DD lower bound; absent means unbounded past. */
+  effectiveFrom?: string;
 }
 
 /**
@@ -192,10 +208,26 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
   history: PriceHistory;
   origin: 'bundled' | 'refreshed';
   path: string;
+  sources: EffectivePriceSource[];
   warnings: string[];
 } {
   const userPath = userPricesPath(opts?.configDir);
   const warnings: string[] = [];
+  for (const historyPath of userHistoryPaths(opts?.configDir)) {
+    if (!existsSync(historyPath)) continue;
+    try {
+      loadPriceHistory(historyPath);
+      warnings.push(
+        `user historical pricing file at ${historyPath} is ignored: refreshed tables are effective from their asOf date only; ` +
+          'bundled history remains authoritative for older dates',
+      );
+    } catch (err) {
+      warnings.push(
+        `user historical pricing file at ${historyPath} is invalid (${err instanceof Error ? err.message : String(err)}); ` +
+          'ignoring it and using bundled history',
+      );
+    }
+  }
   if (existsSync(userPath)) {
     try {
       const raw = JSON.parse(readFileSync(userPath, 'utf8')) as unknown;
@@ -205,7 +237,17 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
         history: loadBundledPriceHistory(),
         origin: 'refreshed',
         path: userPath,
-        warnings: parsed.warnings,
+        sources: [
+          {
+            origin: 'bundled',
+            path:
+              embeddedPriceHistory() !== undefined
+                ? '(embedded in binary)'
+                : resolveBundledPriceHistoryPath(),
+          },
+          { origin: 'refreshed', path: userPath, effectiveFrom: parsed.table.asOf },
+        ],
+        warnings: [...warnings, ...parsed.warnings],
       };
     } catch (err) {
       warnings.push(
@@ -222,6 +264,7 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
     history: loadBundledPriceHistory(),
     origin: 'bundled',
     path: bundledPath,
+    sources: [{ origin: 'bundled', path: bundledPath }],
     warnings,
   };
 }
@@ -287,10 +330,16 @@ export function priceTokens(
   table: PriceTable,
   rawModel: string,
   tokens: TokenCounts,
-  opts?: { ts?: number; history?: PriceHistory },
+  opts?: { ts?: number; history?: PriceHistory; currentEffectiveFrom?: string },
 ): MoneyBreakdown | null {
   const match = matchModel(table, rawModel);
   if (match === null) return null;
+  if (opts?.ts !== undefined && opts.currentEffectiveFrom !== undefined) {
+    const eventDate = new Date(opts.ts).toISOString().slice(0, 10);
+    if (eventDate >= opts.currentEffectiveFrom) {
+      return costBreakdown(tokens, resolveCard(match.card).nano);
+    }
+  }
   return costBreakdown(tokens, resolveCard(cardForDate(match, opts?.history, opts?.ts)).nano);
 }
 

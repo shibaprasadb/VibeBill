@@ -190,7 +190,10 @@ export function baseJson(
     vibebill: vibebillVersion(),
     repoRoot: ctx.repoRoot,
     plan: ctx.plan,
-    pricing: { asOf: ctx.prices.table.asOf, origin: ctx.prices.origin },
+    pricing:
+      ctx.prices.sources.length > 1
+        ? { asOf: ctx.prices.table.asOf, origin: ctx.prices.origin, sources: ctx.prices.sources }
+        : { asOf: ctx.prices.table.asOf, origin: ctx.prices.origin },
     invariant: {
       ok: check.ok,
       totalTokens: check.rawTokens,
