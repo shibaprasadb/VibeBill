@@ -80,7 +80,9 @@ async function runCli(repoRoot: string, args: string[]): Promise<CliRun> {
   const io = captureIO();
   process.chdir(repoRoot);
   process.exitCode = 0;
-  await buildProgram(io).exitOverride().parseAsync(['node', 'vibebill', ...args]);
+  await buildProgram(io)
+    .exitOverride()
+    .parseAsync(['node', 'vibebill', ...args]);
   const exitCode = process.exitCode ?? 0;
   process.exitCode = 0;
   return { exitCode, stdout: io.stdout.join('\n'), stderr: io.stderr.join('\n') };
@@ -102,7 +104,12 @@ async function makeFixture(tag: string, sessionId: string): Promise<Fixture> {
 
   const repo = await makeRepo(tmp);
   const appPath = path.join(repo.root, 'src', 'app.ts');
-  const s = session({ sessionId, defaultCwd: repo.root, defaultBranch: 'main', defaultModel: MODEL });
+  const s = session({
+    sessionId,
+    defaultCwd: repo.root,
+    defaultBranch: 'main',
+    defaultModel: MODEL,
+  });
   s.at(EDIT1_TS).call({ usage: USAGE[0], edits: [appPath] });
   s.at(EDIT2_TS).call({ usage: USAGE[1], edits: [appPath] });
   s.at(TRAIL_TS).call({ usage: USAGE[2] }); // non-edit: forward/backward-attaches (§5.4 Step C)
@@ -182,7 +189,9 @@ const PRICE_TABLE = JSON.parse(
 
 const TOKEN_CLASSES = ['input', 'output', 'cacheWrite', 'cacheRead'] as const;
 
-function referenceCost(card: PriceCardJson): Record<(typeof TOKEN_CLASSES)[number] | 'total', bigint> {
+function referenceCost(
+  card: PriceCardJson,
+): Record<(typeof TOKEN_CLASSES)[number] | 'total', bigint> {
   const rate = {
     input: nanoPerMTok(card.inputPerMTok),
     output: nanoPerMTok(card.outputPerMTok),
@@ -245,7 +254,16 @@ describe('S9 — plan mode: API-equivalent wording, zero plan-price math (spec �
   });
 
   it('all runs exit 0 and the accounting invariant holds', () => {
-    for (const run of [plainText, plainJson, planText, planJson, configText, configJson, overrideText, overrideJson]) {
+    for (const run of [
+      plainText,
+      plainJson,
+      planText,
+      planJson,
+      configText,
+      configJson,
+      overrideText,
+      overrideJson,
+    ]) {
       expect(run.exitCode).toBe(0);
     }
     const payload = parsePayload(plainJson);
@@ -423,5 +441,109 @@ describe('S11 — reprice: hand-computed bigint expectation + honesty label (spe
     for (const id of Object.keys(PRICE_TABLE.models)) {
       expect(unknownRun.stderr).toContain(id);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic pricing — dated history changes measured costs per event timestamp
+// ---------------------------------------------------------------------------
+
+describe('dynamic pricing scenario: same model at different timestamps uses different cards', () => {
+  const originalCwd = process.cwd();
+  let tmp: string;
+  let repo: FixtureRepo;
+  let jsonRun: CliRun;
+  const historyGlobal = globalThis as { __vibebillBundledPriceHistory?: unknown };
+  const previousHistory = historyGlobal.__vibebillBundledPriceHistory;
+
+  beforeAll(async () => {
+    historyGlobal.__vibebillBundledPriceHistory = {
+      schemaVersion: 1,
+      models: {
+        [MODEL]: [
+          {
+            modelId: MODEL,
+            displayName: 'claude-opus-4-8-old-test-price',
+            effectiveFrom: '2026-01-01',
+            inputPerMTok: '1',
+            outputPerMTok: '0',
+            cacheWritePerMTok: '0',
+            cacheReadPerMTok: '0',
+          },
+          {
+            modelId: MODEL,
+            displayName: 'claude-opus-4-8-new-test-price',
+            effectiveFrom: '2026-03-01',
+            inputPerMTok: '2',
+            outputPerMTok: '0',
+            cacheWritePerMTok: '0',
+            cacheReadPerMTok: '0',
+          },
+        ],
+      },
+    };
+
+    tmp = await mkdtemp(path.join(os.tmpdir(), 'vibebill-dynamic-pricing-'));
+    const claudeDir = path.join(tmp, 'claude');
+    const configDir = path.join(tmp, 'config');
+    await mkdir(configDir, { recursive: true });
+    repo = await makeRepo(tmp);
+    const appPath = path.join(repo.root, 'src', 'app.ts');
+    const s = session({
+      sessionId: '00000000-0000-4000-8000-000000000012',
+      defaultCwd: repo.root,
+      defaultBranch: 'main',
+      defaultModel: MODEL,
+    });
+    s.at('2026-02-15T12:00:00.000Z').call({
+      usage: { input: 1_000_000, output: 0, cacheWrite: 0, cacheRead: 0 },
+      edits: [appPath],
+    });
+    s.at('2026-04-15T12:00:00.000Z').call({
+      usage: { input: 1_000_000, output: 0, cacheWrite: 0, cacheRead: 0 },
+      edits: [appPath],
+    });
+    await writeTranscripts(claudeDir, [s]);
+    await repo.commitFile('src/app.ts', 'export const app = 1;\n', {
+      message: 'feat: add app',
+      authorDate: toGitIsoDate(Date.parse('2026-04-15T12:10:00.000Z')),
+    });
+
+    vi.stubEnv('VIBEBILL_CLAUDE_DIR', claudeDir);
+    vi.stubEnv('VIBEBILL_CODEX_DIR', '/nonexistent');
+    vi.stubEnv('VIBEBILL_GEMINI_DIR', '/nonexistent');
+    vi.stubEnv('VIBEBILL_CONFIG_DIR', configDir);
+    vi.stubEnv('VIBEBILL_AIDER_HISTORY', '');
+    vi.stubEnv('VIBEBILL_NOW', String(Date.parse('2026-04-16T00:00:00.000Z')));
+    jsonRun = await runCli(repo.root, ['summary', '--json']);
+  });
+
+  afterAll(async () => {
+    process.chdir(originalCwd);
+    vi.unstubAllEnvs();
+    if (previousHistory === undefined) {
+      delete historyGlobal.__vibebillBundledPriceHistory;
+    } else {
+      historyGlobal.__vibebillBundledPriceHistory = previousHistory;
+    }
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it('two transcript events for one model produce different costs based on their timestamps', () => {
+    expect(jsonRun.exitCode).toBe(0);
+    const payload = parsePayload(jsonRun) as unknown as {
+      totals: { cost: MoneyJson };
+      byModel: Array<{ model: string; events: number; cost: MoneyJson }>;
+    };
+
+    // The February event costs $1.00 and the April event costs $2.00.
+    expect(payload.totals.cost.nanoUsd).toBe('3000000000');
+    expect(payload.byModel).toEqual([
+      expect.objectContaining({
+        model: MODEL,
+        events: 2,
+        cost: { nanoUsd: '3000000000', usd: '3.00' },
+      }),
+    ]);
   });
 });
