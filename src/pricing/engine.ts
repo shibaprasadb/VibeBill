@@ -13,11 +13,7 @@ import { fileURLToPath } from 'node:url';
 import type { MoneyBreakdown, TokenCounts } from '../core/types.js';
 import { CliUserError, InternalError } from '../core/errors.js';
 import { convertLiteLLMTable } from './convert.js';
-import {
-  costBreakdown,
-  parsePriceToNanoPerMTok,
-  type PriceCardNano,
-} from './money.js';
+import { costBreakdown, parsePriceToNanoPerMTok, type PriceCardNano } from './money.js';
 import { parsePriceTable } from './schema.js';
 
 /** One model's prices as decimal strings in $/MTok (spec §5.5). */
@@ -36,6 +32,15 @@ export interface PriceTable {
   source: string;
   models: Record<string, PriceCard>;
 }
+
+/** A dated override loaded from prices/price-history.csv. */
+export interface PriceHistoryRow extends PriceCard {
+  model: string;
+  /** Inclusive UTC date (YYYY-MM-DD) from which this card applies. */
+  effectiveDate: string;
+}
+
+export type PriceHistory = Record<string, PriceHistoryRow[]>;
 
 /** The one URL vibebill is ever allowed to fetch (spec §14.3 rule 1). */
 export const LITELLM_PRICES_URL =
@@ -62,6 +67,11 @@ export function resolveBundledPricesPath(fromModuleUrl: string = import.meta.url
   );
 }
 
+/** Resolve the optional bundled prices/price-history.csv next to prices.json. Exported for tests only. */
+export function resolveBundledPriceHistoryPath(fromModuleUrl: string = import.meta.url): string {
+  return path.join(path.dirname(resolveBundledPricesPath(fromModuleUrl)), 'price-history.csv');
+}
+
 /**
  * The single-executable build (scripts/build-sea.mjs) injects the bundled
  * price table as a global because a SEA binary carries no prices.json on
@@ -69,6 +79,93 @@ export function resolveBundledPricesPath(fromModuleUrl: string = import.meta.url
  */
 function embeddedPrices(): unknown {
   return (globalThis as { __vibebillBundledPrices?: unknown }).__vibebillBundledPrices;
+}
+
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else if (ch === '"') {
+        quoted = false;
+      } else {
+        field += ch;
+      }
+    } else if (ch === ',') {
+      out.push(field);
+      field = '';
+    } else if (ch === '"') {
+      quoted = true;
+    } else {
+      field += ch;
+    }
+  }
+  out.push(field);
+  return out;
+}
+
+function assertIsoDate(date: string, label: string): void {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    Number.isNaN(parsed.getTime()) ||
+    parsed.toISOString().slice(0, 10) !== date
+  ) {
+    throw new Error(`${label} must be a valid YYYY-MM-DD date`);
+  }
+}
+
+/** Load static dated price changes from a CSV file. Missing files mean no history. */
+export function loadPriceHistory(csvPath?: string): PriceHistory {
+  csvPath ??= resolveBundledPriceHistoryPath();
+  if (!existsSync(csvPath)) return {};
+  const raw = readFileSync(csvPath, 'utf8').trim();
+  if (raw === '') return {};
+  const [headerLine, ...lines] = raw.split(/\r?\n/);
+  const headers = parseCsvLine(headerLine ?? '');
+  const required = ['model', 'effectiveDate', 'displayName', 'inputPerMTok', 'outputPerMTok'];
+  for (const h of required) {
+    if (!headers.includes(h))
+      throw new Error(`invalid price history ${csvPath}: missing column ${h}`);
+  }
+  const history: PriceHistory = {};
+  for (const [lineIndex, line] of lines.entries()) {
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    const values = parseCsvLine(line);
+    const get = (name: string): string => values[headers.indexOf(name)]?.trim() ?? '';
+    const row: PriceHistoryRow = {
+      model: get('model'),
+      effectiveDate: get('effectiveDate'),
+      displayName: get('displayName'),
+      inputPerMTok: get('inputPerMTok'),
+      outputPerMTok: get('outputPerMTok'),
+    };
+    if (row.model === '') {
+      throw new Error(`invalid price history ${csvPath}:${lineIndex + 2}: model is required`);
+    }
+    assertIsoDate(
+      row.effectiveDate,
+      `invalid price history ${csvPath}:${lineIndex + 2}: effectiveDate`,
+    );
+    if (get('cacheWritePerMTok') !== '') row.cacheWritePerMTok = get('cacheWritePerMTok');
+    if (get('cacheReadPerMTok') !== '') row.cacheReadPerMTok = get('cacheReadPerMTok');
+    resolveCard(row); // validate decimal prices exactly like normal cards
+    (history[row.model] ??= []).push(row);
+  }
+  for (const rows of Object.values(history)) {
+    rows.sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
+  }
+  return history;
+}
+
+function loadBundledPriceHistory(): PriceHistory {
+  if (embeddedPrices() !== undefined) return {};
+  return loadPriceHistory();
 }
 
 /** zod-validate and load the bundled prices/prices.json (resolved relative to this module). */
@@ -123,6 +220,7 @@ function userPricesPath(configDir?: string): string {
  */
 export function loadEffectivePrices(opts?: { configDir?: string }): {
   table: PriceTable;
+  history: PriceHistory;
   origin: 'bundled' | 'refreshed';
   path: string;
   warnings: string[];
@@ -133,7 +231,13 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
     try {
       const raw = JSON.parse(readFileSync(userPath, 'utf8')) as unknown;
       const parsed = parsePriceTable(raw, `refreshed ${userPath}`);
-      return { table: parsed.table, origin: 'refreshed', path: userPath, warnings: parsed.warnings };
+      return {
+        table: parsed.table,
+        history: loadBundledPriceHistory(),
+        origin: 'refreshed',
+        path: userPath,
+        warnings: parsed.warnings,
+      };
     } catch (err) {
       warnings.push(
         `refreshed price table at ${userPath} is invalid (${err instanceof Error ? err.message : String(err)}); ` +
@@ -144,7 +248,13 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
   const table = loadBundledPrices();
   const bundledPath =
     embeddedPrices() !== undefined ? '(embedded in binary)' : resolveBundledPricesPath();
-  return { table, origin: 'bundled', path: bundledPath, warnings };
+  return {
+    table,
+    history: loadBundledPriceHistory(),
+    origin: 'bundled',
+    path: bundledPath,
+    warnings,
+  };
 }
 
 /**
@@ -187,14 +297,32 @@ export function resolveCard(card: PriceCard): { nano: PriceCardNano; cacheFallba
 }
 
 /** Price one event's tokens; null when the model is unknown (caller records the unknown model). */
+export function cardForDate(
+  match: { id: string; card: PriceCard },
+  history: PriceHistory | undefined,
+  ts: number | undefined,
+): PriceCard {
+  if (history === undefined || ts === undefined) return match.card;
+  const rows = history[match.id];
+  if (rows === undefined) return match.card;
+  const eventDate = new Date(ts).toISOString().slice(0, 10);
+  let selected: PriceHistoryRow | undefined;
+  for (const row of rows) {
+    if (row.effectiveDate <= eventDate) selected = row;
+    else break;
+  }
+  return selected ?? match.card;
+}
+
 export function priceTokens(
   table: PriceTable,
   rawModel: string,
   tokens: TokenCounts,
+  opts?: { ts?: number; history?: PriceHistory },
 ): MoneyBreakdown | null {
   const match = matchModel(table, rawModel);
   if (match === null) return null;
-  return costBreakdown(tokens, resolveCard(match.card).nano);
+  return costBreakdown(tokens, resolveCard(cardForDate(match, opts?.history, opts?.ts)).nano);
 }
 
 /**

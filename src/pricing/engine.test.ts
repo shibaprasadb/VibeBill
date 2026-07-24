@@ -9,6 +9,7 @@ import {
   LITELLM_PRICES_URL,
   loadBundledPrices,
   loadEffectivePrices,
+  loadPriceHistory,
   matchModel,
   priceTokens,
   refreshPricing,
@@ -117,7 +118,12 @@ describe('resolveCard', () => {
 
 describe('priceTokens', () => {
   const t = table({ 'claude-opus-4-8': OPUS_4_8 });
-  const tokens = { input: 1_000_000, output: 2_000_000, cacheWrite: 400_000, cacheRead: 10_000_000 };
+  const tokens = {
+    input: 1_000_000,
+    output: 2_000_000,
+    cacheWrite: 400_000,
+    cacheRead: 10_000_000,
+  };
 
   it('prices a known model exactly', () => {
     const cost = priceTokens(t, 'claude-opus-4-8-20260115', tokens);
@@ -131,6 +137,39 @@ describe('priceTokens', () => {
 
   it('returns null for unknown models (never guesses)', () => {
     expect(priceTokens(t, 'totally-unknown-model', tokens)).toBeNull();
+  });
+
+  it('prices with the latest CSV history row effective on the event day', async () => {
+    const dir = await makeTempDir();
+    const csv = path.join(dir, 'price-history.csv');
+    writeFileSync(
+      csv,
+      [
+        'model,effectiveDate,displayName,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
+        'claude-opus-4-8,2026-01-01,old-opus,10,20,30,40',
+        'claude-opus-4-8,2026-03-01,new-opus,1,2,3,4',
+      ].join('\n'),
+      'utf8',
+    );
+    const history = loadPriceHistory(csv);
+
+    const beforeChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2026-02-15T12:00:00.000Z'),
+    });
+    const afterChange = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2026-03-01T00:00:00.000Z'),
+    });
+
+    expect(beforeChange!.input).toBe(10_000_000_000n);
+    expect(beforeChange!.output).toBe(40_000_000_000n);
+    expect(beforeChange!.cacheWrite).toBe(12_000_000_000n);
+    expect(beforeChange!.cacheRead).toBe(400_000_000_000n);
+    expect(afterChange!.input).toBe(1_000_000_000n);
+    expect(afterChange!.output).toBe(4_000_000_000n);
+    expect(afterChange!.cacheWrite).toBe(1_200_000_000n);
+    expect(afterChange!.cacheRead).toBe(40_000_000_000n);
   });
 });
 
@@ -329,8 +368,8 @@ describe('refreshPricing', () => {
 
   it('fetches, converts exactly, and writes the user table', async () => {
     const configDir = await makeTempDir();
-    const { impl, calls } = stubFetch(async () =>
-      new Response(JSON.stringify(litellmPayload), { status: 200 }),
+    const { impl, calls } = stubFetch(
+      async () => new Response(JSON.stringify(litellmPayload), { status: 200 }),
     );
     const result = await refreshPricing({ configDir, fetchImpl: impl });
 
@@ -377,8 +416,8 @@ describe('refreshPricing', () => {
 
   it('omits models missing prices, wrong mode, or wrong provider', async () => {
     const configDir = await makeTempDir();
-    const { impl } = stubFetch(async () =>
-      new Response(JSON.stringify(litellmPayload), { status: 200 }),
+    const { impl } = stubFetch(
+      async () => new Response(JSON.stringify(litellmPayload), { status: 200 }),
     );
     const result = await refreshPricing({ configDir, fetchImpl: impl });
     const written = JSON.parse(readFileSync(result.path, 'utf8')) as PriceTable;
@@ -419,8 +458,8 @@ describe('refreshPricing', () => {
 
   it('non-object payload throws CliUserError and keeps no partial file', async () => {
     const configDir = await makeTempDir();
-    const { impl } = stubFetch(async () =>
-      new Response(JSON.stringify('not a table'), { status: 200 }),
+    const { impl } = stubFetch(
+      async () => new Response(JSON.stringify('not a table'), { status: 200 }),
     );
     await expect(refreshPricing({ configDir, fetchImpl: impl })).rejects.toBeInstanceOf(
       CliUserError,
@@ -441,8 +480,8 @@ describe('refreshPricing', () => {
     const configDir = await makeTempDir();
     // Occupy the vibebill directory path with a FILE so mkdir/write must fail.
     writeFileSync(path.join(configDir, 'vibebill'), 'in the way', 'utf8');
-    const { impl } = stubFetch(async () =>
-      new Response(JSON.stringify(litellmPayload), { status: 200 }),
+    const { impl } = stubFetch(
+      async () => new Response(JSON.stringify(litellmPayload), { status: 200 }),
     );
     await expect(refreshPricing({ configDir, fetchImpl: impl })).rejects.toBeInstanceOf(
       CliUserError,
