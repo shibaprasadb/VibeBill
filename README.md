@@ -196,10 +196,13 @@ honest. Never invent a number: if a source doesn't list a model, the model stays
 table (unknown models render as `$—` by design).
 
 If a model's price changed over time, add a row to
-[prices/price-history.csv](prices/price-history.csv) with `model`, `effectiveDate`,
-`displayName`, and the same $/MTok price columns. For each usage event, vibebill uses the
-latest row whose `effectiveDate` is on or before that event's UTC date before it computes
-the token cost.
+[prices/prices-history.csv](prices/prices-history.csv). The CSV columns are `modelId`,
+`displayName`, `effectiveFrom`, `inputPerMTok`, `outputPerMTok`, `cacheWritePerMTok`, and
+`cacheReadPerMTok`. `effectiveFrom` must be a valid `YYYY-MM-DD` UTC date, prices use the
+same exact decimal $/MTok format as `prices.json`, and each `{ modelId, effectiveFrom }`
+pair must appear only once. The build converts this offline CSV into the bundled
+`prices/prices-history.json`; at runtime, vibebill uses the latest row whose
+`effectiveFrom` is on or before the usage event's UTC date before computing token cost.
 
 Also welcome: sanitized Gemini CLI and aider log samples (structure and metadata intact,
 content replaced) to verify those adapters against reality.

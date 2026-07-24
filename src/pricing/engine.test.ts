@@ -141,13 +141,13 @@ describe('priceTokens', () => {
 
   it('prices with the latest CSV history row effective on the event day', async () => {
     const dir = await makeTempDir();
-    const csv = path.join(dir, 'price-history.csv');
+    const csv = path.join(dir, 'prices-history.csv');
     writeFileSync(
       csv,
       [
-        'model,effectiveDate,displayName,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
-        'claude-opus-4-8,2026-01-01,old-opus,10,20,30,40',
-        'claude-opus-4-8,2026-03-01,new-opus,1,2,3,4',
+        'modelId,displayName,effectiveFrom,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
+        'claude-opus-4-8,old-opus,2026-01-01,10,20,30,40',
+        'claude-opus-4-8,new-opus,2026-03-01,1,2,3,4',
       ].join('\n'),
       'utf8',
     );

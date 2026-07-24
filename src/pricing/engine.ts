@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import type { MoneyBreakdown, TokenCounts } from '../core/types.js';
 import { CliUserError, InternalError } from '../core/errors.js';
 import { convertLiteLLMTable } from './convert.js';
+import { parsePriceHistoryCsv, type PriceHistory, type PriceHistoryRow } from './history.js';
+export type { PriceHistory, PriceHistoryRow } from './history.js';
 import { costBreakdown, parsePriceToNanoPerMTok, type PriceCardNano } from './money.js';
 import { parsePriceTable } from './schema.js';
 
@@ -32,15 +34,6 @@ export interface PriceTable {
   source: string;
   models: Record<string, PriceCard>;
 }
-
-/** A dated override loaded from prices/price-history.csv. */
-export interface PriceHistoryRow extends PriceCard {
-  model: string;
-  /** Inclusive UTC date (YYYY-MM-DD) from which this card applies. */
-  effectiveDate: string;
-}
-
-export type PriceHistory = Record<string, PriceHistoryRow[]>;
 
 /** The one URL vibebill is ever allowed to fetch (spec §14.3 rule 1). */
 export const LITELLM_PRICES_URL =
@@ -67,9 +60,9 @@ export function resolveBundledPricesPath(fromModuleUrl: string = import.meta.url
   );
 }
 
-/** Resolve the optional bundled prices/price-history.csv next to prices.json. Exported for tests only. */
+/** Resolve the generated bundled prices/prices-history.json next to prices.json. Exported for tests only. */
 export function resolveBundledPriceHistoryPath(fromModuleUrl: string = import.meta.url): string {
-  return path.join(path.dirname(resolveBundledPricesPath(fromModuleUrl)), 'price-history.csv');
+  return path.join(path.dirname(resolveBundledPricesPath(fromModuleUrl)), 'prices-history.json');
 }
 
 /**
@@ -81,90 +74,66 @@ function embeddedPrices(): unknown {
   return (globalThis as { __vibebillBundledPrices?: unknown }).__vibebillBundledPrices;
 }
 
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"' && line[i + 1] === '"') {
-        field += '"';
-        i += 1;
-      } else if (ch === '"') {
-        quoted = false;
-      } else {
-        field += ch;
-      }
-    } else if (ch === ',') {
-      out.push(field);
-      field = '';
-    } else if (ch === '"') {
-      quoted = true;
-    } else {
-      field += ch;
-    }
-  }
-  out.push(field);
-  return out;
+function embeddedPriceHistory(): unknown {
+  return (globalThis as { __vibebillBundledPriceHistory?: unknown }).__vibebillBundledPriceHistory;
 }
 
-function assertIsoDate(date: string, label: string): void {
-  const parsed = new Date(`${date}T00:00:00.000Z`);
+/** Load static dated price changes from generated JSON. Missing files mean no history. */
+export function loadPriceHistory(historyPath?: string): PriceHistory {
+  historyPath ??= resolveBundledPriceHistoryPath();
+  if (!existsSync(historyPath)) return {};
+  const rawText = readFileSync(historyPath, 'utf8');
+  if (historyPath.endsWith('.csv')) return parsePriceHistoryCsv(rawText, historyPath);
+  const raw = JSON.parse(rawText) as unknown;
   if (
-    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-    Number.isNaN(parsed.getTime()) ||
-    parsed.toISOString().slice(0, 10) !== date
+    typeof raw !== 'object' ||
+    raw === null ||
+    Array.isArray(raw) ||
+    (raw as { schemaVersion?: unknown }).schemaVersion !== 1 ||
+    typeof (raw as { models?: unknown }).models !== 'object' ||
+    (raw as { models?: unknown }).models === null ||
+    Array.isArray((raw as { models?: unknown }).models)
   ) {
-    throw new Error(`${label} must be a valid YYYY-MM-DD date`);
+    throw new Error(`invalid price history ${historyPath}: expected schemaVersion 1 document`);
   }
-}
-
-/** Load static dated price changes from a CSV file. Missing files mean no history. */
-export function loadPriceHistory(csvPath?: string): PriceHistory {
-  csvPath ??= resolveBundledPriceHistoryPath();
-  if (!existsSync(csvPath)) return {};
-  const raw = readFileSync(csvPath, 'utf8').trim();
-  if (raw === '') return {};
-  const [headerLine, ...lines] = raw.split(/\r?\n/);
-  const headers = parseCsvLine(headerLine ?? '');
-  const required = ['model', 'effectiveDate', 'displayName', 'inputPerMTok', 'outputPerMTok'];
-  for (const h of required) {
-    if (!headers.includes(h))
-      throw new Error(`invalid price history ${csvPath}: missing column ${h}`);
-  }
-  const history: PriceHistory = {};
-  for (const [lineIndex, line] of lines.entries()) {
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
-    const values = parseCsvLine(line);
-    const get = (name: string): string => values[headers.indexOf(name)]?.trim() ?? '';
-    const row: PriceHistoryRow = {
-      model: get('model'),
-      effectiveDate: get('effectiveDate'),
-      displayName: get('displayName'),
-      inputPerMTok: get('inputPerMTok'),
-      outputPerMTok: get('outputPerMTok'),
-    };
-    if (row.model === '') {
-      throw new Error(`invalid price history ${csvPath}:${lineIndex + 2}: model is required`);
+  const history = (raw as { models: PriceHistory }).models;
+  for (const [modelId, rows] of Object.entries(history)) {
+    if (!Array.isArray(rows)) {
+      throw new Error(`invalid price history ${historyPath}: ${modelId} rows must be an array`);
     }
-    assertIsoDate(
-      row.effectiveDate,
-      `invalid price history ${csvPath}:${lineIndex + 2}: effectiveDate`,
-    );
-    if (get('cacheWritePerMTok') !== '') row.cacheWritePerMTok = get('cacheWritePerMTok');
-    if (get('cacheReadPerMTok') !== '') row.cacheReadPerMTok = get('cacheReadPerMTok');
-    resolveCard(row); // validate decimal prices exactly like normal cards
-    (history[row.model] ??= []).push(row);
-  }
-  for (const rows of Object.values(history)) {
-    rows.sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
+    const csv = [
+      'modelId,displayName,effectiveFrom,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok',
+      ...rows.map((row) =>
+        [
+          row.modelId,
+          row.displayName,
+          row.effectiveFrom,
+          row.inputPerMTok,
+          row.outputPerMTok,
+          row.cacheWritePerMTok ?? '',
+          row.cacheReadPerMTok ?? '',
+        ].join(','),
+      ),
+    ].join('\n');
+    parsePriceHistoryCsv(csv, `${historyPath}:${modelId}`);
   }
   return history;
 }
 
 function loadBundledPriceHistory(): PriceHistory {
-  if (embeddedPrices() !== undefined) return {};
+  const embedded = embeddedPriceHistory();
+  if (embedded !== undefined) {
+    const raw = embedded as { models?: unknown };
+    if (
+      typeof raw === 'object' &&
+      raw !== null &&
+      typeof raw.models === 'object' &&
+      raw.models !== null
+    ) {
+      return raw.models as PriceHistory;
+    }
+    throw new InternalError('invalid embedded price history');
+  }
   return loadPriceHistory();
 }
 
@@ -308,7 +277,7 @@ export function cardForDate(
   const eventDate = new Date(ts).toISOString().slice(0, 10);
   let selected: PriceHistoryRow | undefined;
   for (const row of rows) {
-    if (row.effectiveDate <= eventDate) selected = row;
+    if (row.effectiveFrom <= eventDate) selected = row;
     else break;
   }
   return selected ?? match.card;
