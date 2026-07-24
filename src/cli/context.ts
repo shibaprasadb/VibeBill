@@ -32,7 +32,12 @@ import type {
 } from '../core/types.js';
 import { addTokenCounts, totalTokens, ZERO_TOKENS } from '../core/types.js';
 import { enumerateCommits, resolveRepoRoot, revList } from '../git/index.js';
-import { loadEffectivePrices, priceTokens, type PriceTable } from '../pricing/engine.js';
+import {
+  loadEffectivePrices,
+  priceTokens,
+  type PriceHistory,
+  type PriceTable,
+} from '../pricing/engine.js';
 
 /** Parsed global flags shared by every command (spec §6). */
 export interface GlobalFlags {
@@ -84,7 +89,12 @@ export interface CliContext {
   /** Effective plan: --plan flag wins over vibebill.config.json. */
   plan: PlanId | null;
   flags: GlobalFlags;
-  prices: { table: PriceTable; origin: 'bundled' | 'refreshed'; path: string };
+  prices: {
+    table: PriceTable;
+    history: PriceHistory;
+    origin: 'bundled' | 'refreshed';
+    path: string;
+  };
   /** Full commit enumeration (HEAD or --all-refs), newest first. */
   commits: CommitInfo[];
   commitByHash: Map<string, CommitInfo>;
@@ -254,7 +264,10 @@ export async function buildContext(
     const entry: LedgerEntry = {
       event,
       attribution: a.attribution,
-      cost: priceTokens(prices.table, event.model, event.tokens),
+      cost: priceTokens(prices.table, event.model, event.tokens, {
+        history: prices.history,
+        ts: event.ts,
+      }),
       provenance: provenanceFor(a),
     };
     return {
@@ -286,7 +299,12 @@ export async function buildContext(
     config,
     plan: flags.plan ?? config.plan,
     flags,
-    prices: { table: prices.table, origin: prices.origin, path: prices.path },
+    prices: {
+      table: prices.table,
+      history: prices.history,
+      origin: prices.origin,
+      path: prices.path,
+    },
     commits,
     commitByHash,
     newestCommitAuthorTs,

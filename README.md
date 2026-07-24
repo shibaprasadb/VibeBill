@@ -195,6 +195,12 @@ Price-table PRs are the most useful contribution: edit
 honest. Never invent a number: if a source doesn't list a model, the model stays out of the
 table (unknown models render as `$—` by design).
 
+If a model's price changed over time, add a row to
+[prices/price-history.csv](prices/price-history.csv) with `model`, `effectiveDate`,
+`displayName`, and the same $/MTok price columns. For each usage event, vibebill uses the
+latest row whose `effectiveDate` is on or before that event's UTC date before it computes
+the token cost.
+
 Also welcome: sanitized Gemini CLI and aider log samples (structure and metadata intact,
 content replaced) to verify those adapters against reality.
 
