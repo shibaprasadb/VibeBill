@@ -117,6 +117,14 @@ export function loadPriceHistory(historyPath?: string): PriceHistory {
     ].join('\n');
     parsePriceHistoryCsv(csv, `${historyPath}:${modelId}`);
   }
+  return sortPriceHistory(history);
+}
+
+/** Sort each model's rows ascending by effectiveFrom, in place, so JSON matches the CSV path. */
+function sortPriceHistory(history: PriceHistory): PriceHistory {
+  for (const rows of Object.values(history)) {
+    rows.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+  }
   return history;
 }
 
@@ -130,7 +138,7 @@ function loadBundledPriceHistory(): PriceHistory {
       typeof raw.models === 'object' &&
       raw.models !== null
     ) {
-      return raw.models as PriceHistory;
+      return sortPriceHistory(raw.models as PriceHistory);
     }
     throw new InternalError('invalid embedded price history');
   }
@@ -308,22 +316,65 @@ export function resolveCard(card: PriceCard): { nano: PriceCardNano; cacheFallba
   };
 }
 
-/** Price one event's tokens; null when the model is unknown (caller records the unknown model). */
+/**
+ * The historical row with the greatest effectiveFrom on or before `eventDate`,
+ * or undefined when none applies. Order-independent: it does not assume the
+ * rows are pre-sorted (a hand-edited prices-history.json may not be), so a row
+ * cannot be shadowed by a later-listed but older-dated sibling.
+ */
+function latestHistoryRow(
+  history: PriceHistory | undefined,
+  modelId: string,
+  eventDate: string,
+): PriceHistoryRow | undefined {
+  const rows = history?.[modelId];
+  if (rows === undefined) return undefined;
+  let selected: PriceHistoryRow | undefined;
+  for (const row of rows) {
+    if (
+      row.effectiveFrom <= eventDate &&
+      (selected === undefined || row.effectiveFrom > selected.effectiveFrom)
+    ) {
+      selected = row;
+    }
+  }
+  return selected;
+}
+
+/** Historical card effective on the event's UTC day, or the current card when none applies. */
 export function cardForDate(
   match: { id: string; card: PriceCard },
   history: PriceHistory | undefined,
   ts: number | undefined,
 ): PriceCard {
   if (history === undefined || ts === undefined) return match.card;
-  const rows = history[match.id];
-  if (rows === undefined) return match.card;
   const eventDate = new Date(ts).toISOString().slice(0, 10);
-  let selected: PriceHistoryRow | undefined;
-  for (const row of rows) {
-    if (row.effectiveFrom <= eventDate) selected = row;
-    else break;
+  return latestHistoryRow(history, match.id, eventDate) ?? match.card;
+}
+
+/**
+ * The price card in force for a matched model on the event's UTC day. The
+ * loaded table card behaves as a dated card effective from `currentEffectiveFrom`
+ * (its asOf); whichever of {table card, newest applicable history row} has the
+ * greater effectiveFrom on or before the event day wins. This still lets a
+ * change recorded AFTER asOf take effect, rather than being silently shadowed
+ * by the stale table card.
+ */
+function effectiveCard(
+  match: { id: string; card: PriceCard },
+  opts?: { ts?: number; history?: PriceHistory; currentEffectiveFrom?: string },
+): PriceCard {
+  if (opts?.ts === undefined) return match.card;
+  const eventDate = new Date(opts.ts).toISOString().slice(0, 10);
+  const histRow = latestHistoryRow(opts.history, match.id, eventDate);
+  if (histRow === undefined) return match.card;
+  const cur = opts.currentEffectiveFrom;
+  // Table card applies only from its asOf; it wins only when at least as recent
+  // as the newest history row on/before the event day.
+  if (cur !== undefined && cur <= eventDate && cur >= histRow.effectiveFrom) {
+    return match.card;
   }
-  return selected ?? match.card;
+  return histRow;
 }
 
 export function priceTokens(
@@ -334,13 +385,7 @@ export function priceTokens(
 ): MoneyBreakdown | null {
   const match = matchModel(table, rawModel);
   if (match === null) return null;
-  if (opts?.ts !== undefined && opts.currentEffectiveFrom !== undefined) {
-    const eventDate = new Date(opts.ts).toISOString().slice(0, 10);
-    if (eventDate >= opts.currentEffectiveFrom) {
-      return costBreakdown(tokens, resolveCard(match.card).nano);
-    }
-  }
-  return costBreakdown(tokens, resolveCard(cardForDate(match, opts?.history, opts?.ts)).nano);
+  return costBreakdown(tokens, resolveCard(effectiveCard(match, opts)).nano);
 }
 
 /**

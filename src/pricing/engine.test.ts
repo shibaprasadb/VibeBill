@@ -229,7 +229,7 @@ describe('priceTokens', () => {
     expect(cost!.input).toBe(1_000_000_000n);
   });
 
-  it('uses current table from currentEffectiveFrom even when bundled history has later rows', async () => {
+  it('lets a history row dated after currentEffectiveFrom take effect (not shadowed by the table)', async () => {
     const dir = await makeTempDir();
     const csv = path.join(dir, 'prices-history.csv');
     writeFileSync(
@@ -243,14 +243,83 @@ describe('priceTokens', () => {
     );
     const history = loadPriceHistory(csv);
 
+    // Event on 2026-08-15: the 2026-08-01 row is newer than the table's asOf
+    // (2026-07-14), so it — not the stale table card — is in force.
     const cost = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
       history,
       ts: Date.parse('2026-08-15T12:00:00.000Z'),
       currentEffectiveFrom: '2026-07-14',
     });
 
+    expect(cost!.input).toBe(1_000_000_000n); // 1 MTok * $1
+    expect(cost!.output).toBe(4_000_000_000n); // 2 MTok * $2
+    expect(cost!.cacheWrite).toBe(1_200_000_000n); // 0.4 MTok * $3
+    expect(cost!.cacheRead).toBe(40_000_000_000n); // 10 MTok * $4
+  });
+
+  it('keeps the current table card for events on/after asOf when no history row is newer', () => {
+    const history = {
+      'claude-opus-4-8': [
+        {
+          modelId: 'claude-opus-4-8',
+          displayName: 'old-opus',
+          effectiveFrom: '2026-01-01',
+          inputPerMTok: '10',
+          outputPerMTok: '20',
+        },
+      ],
+    };
+    const cost = priceTokens(t, 'claude-opus-4-8-20260115', tokens, {
+      history,
+      ts: Date.parse('2026-08-15T12:00:00.000Z'),
+      currentEffectiveFrom: '2026-07-14',
+    });
+    // asOf (2026-07-14) is newer than the only history row (2026-01-01), so the
+    // table card ($5/$25) governs recent usage.
     expect(cost!.input).toBe(5_000_000_000n);
     expect(cost!.output).toBe(50_000_000_000n);
+  });
+
+  it('selects the latest effective row even when JSON history rows are out of order', async () => {
+    const dir = await makeTempDir();
+    const json = path.join(dir, 'prices-history.json');
+    // Rows deliberately NOT sorted by effectiveFrom (as a hand-edited file might be).
+    writeFileSync(
+      json,
+      JSON.stringify({
+        schemaVersion: 1,
+        source: 'test',
+        models: {
+          'claude-opus-4-8': [
+            {
+              modelId: 'claude-opus-4-8',
+              displayName: 'new',
+              effectiveFrom: '2026-03-01',
+              inputPerMTok: '2',
+              outputPerMTok: '0',
+            },
+            {
+              modelId: 'claude-opus-4-8',
+              displayName: 'old',
+              effectiveFrom: '2026-01-01',
+              inputPerMTok: '1',
+              outputPerMTok: '0',
+            },
+          ],
+        },
+      }),
+      'utf8',
+    );
+    const history = loadPriceHistory(json);
+
+    const cost = priceTokens(
+      t,
+      'claude-opus-4-8',
+      { input: 1_000_000, output: 0, cacheWrite: 0, cacheRead: 0 },
+      { history, ts: Date.parse('2026-04-15T00:00:00.000Z') },
+    );
+    // 2026-04-15 falls under the 2026-03-01 row ($2), not the earlier $1 row.
+    expect(cost!.input).toBe(2_000_000_000n);
   });
 });
 
