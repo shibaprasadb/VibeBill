@@ -1,0 +1,22 @@
+# vibebill price history — dated price cards for models whose $/MTok price
+# CHANGED over time (spec §5.5, "dynamic pricing"). Each row is the price that
+# TOOK EFFECT on `effectiveDate` (UTC, YYYY-MM-DD) for `model`, and it stays in
+# force until the next dated row for that same model. Before pricing an event
+# vibebill picks the row in force on the event's own day.
+#
+# Same units and parser as prices/prices.json: prices are $/MTok decimal
+# strings (no floats), and a blank cacheWrite/cacheRead falls back to the input
+# price at pricing time. `model` uses the same id prefixes as prices.json
+# (longest-prefix, so dated suffixes like -2024-08-06 still resolve).
+#
+# A model NOT listed here is priced from its flat prices.json card, so adding
+# history is always safe and additive. To extend: append rows in any order
+# (vibebill sorts by date) with real, sourced price changes. Never invent a
+# number — if you don't know a past price, leave the model out and its flat card
+# is used. A row that fails to parse is dropped with a warning, never guessed.
+model,effectiveDate,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok
+# OpenAI GPT-4o: launch price, then the 2024-08-06 cut. Both endpoints are the
+# per-dated-id prices already pinned in prices.json (gpt-4o-2024-05-13 and
+# gpt-4o-2024-08-06), so nothing here is invented.
+gpt-4o,2024-05-13,5,15,,
+gpt-4o,2024-08-06,2.5,10,,1.25

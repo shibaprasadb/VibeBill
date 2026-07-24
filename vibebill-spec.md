@@ -347,6 +347,18 @@ pure function. No Date.now() inside the engine — "now" is passed in as a param
   JSON, converts, validates with zod, writes `~/.config/vibebill/prices.json` which then
   takes precedence over the bundled file. Offline or on any error: keep last known table,
   warn with its `asOf` date. Never auto-refresh.
+- **Dynamic (date-aware) pricing:** a model's price can change over time while its id is
+  unchanged. `prices/price-history.csv` (bundled, additive overlay) records those changes —
+  one row per change: `model,effectiveDate,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok`,
+  same `$/MTok` decimal strings and exact parser as `prices.json`, `model` keyed by the same
+  id prefixes. Each event is priced on the card **in force on its own day** (`event.ts`); a
+  model absent from the overlay uses its flat `prices.json` card (nothing changes until a
+  dated row is added). Precedence mirrors `prices.json`:
+  `$VIBEBILL_PRICE_HISTORY` > `<configDir>/vibebill/price-history.csv` > bundled. Degrade
+  honestly: a row that fails to parse is dropped with a warning (never guessed), and an event
+  dated before a model's earliest known row is priced at that earliest rate with one
+  aggregated per-model warning. A missing overlay simply disables the feature. Repricing and
+  the model-catalog commands still use the current card (decision D16).
 - **Repricing (`vibebill reprice --model X`):** recompute MoneyBreakdown for the selected
   scope using model X's price card on the *measured* token traffic, with cache-token
   handling: if X's card lacks cache prices, price cacheRead and cacheWrite at

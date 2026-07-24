@@ -173,6 +173,12 @@ ref again (see limitations).
   sessions using 1-hour caching (decision D2 in [docs/decisions.md](docs/decisions.md)).
 - **Unknown models are never guessed.** Tokens are shown, cost is `$—`, and you get one
   aggregated warning per model naming it — try `--refresh-pricing` or send a price-table PR.
+- **Prices are date-aware when history is known.** A model's price sometimes changes over
+  time. [prices/price-history.csv](prices/price-history.csv) records the dates a price
+  changed, and each event is priced on the card that was in force on its own day. Models
+  absent from that file are priced from their flat `prices.json` card, so nothing changes for
+  a model until a dated row is added for it (decision D16 in
+  [docs/decisions.md](docs/decisions.md)).
 
 ## Roadmap
 
@@ -194,6 +200,11 @@ Price-table PRs are the most useful contribution: edit
 **provenance is required** — name your source and its date in the PR so `asOf`/`source` stay
 honest. Never invent a number: if a source doesn't list a model, the model stays out of the
 table (unknown models render as `$—` by design).
+
+Historical price changes go in [prices/price-history.csv](prices/price-history.csv): one row
+per change, `model,effectiveDate,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok`,
+same `$/MTok` decimal strings and same provenance rule. `model` uses the same id prefixes as
+`prices.json`; a row that fails to parse is dropped with a warning, never guessed.
 
 Also welcome: sanitized Gemini CLI and aider log samples (structure and metadata intact,
 content replaced) to verify those adapters against reality.

@@ -159,3 +159,28 @@ The binary carries the version and price table as injected globals since it has 
 package.json or prices.json on disk. esbuild and postject are devDependencies used only by
 scripts/build-sea.mjs — the published npm package remains tsc-only per spec §3; this
 tooling exists solely so non-Node users can run vibebill from a GitHub Release download.
+
+## D16 (2026-07-24) — dynamic (date-aware) pricing via an additive CSV overlay
+
+A model's per-MTok price sometimes changes while its id stays the same (e.g. the
+2024-08-06 gpt-4o cut). prices.json holds one card per model, so it can only reflect the
+latest price; an event from before a cut was mispriced. prices/price-history.csv now records
+the dates a price changed — one row per change,
+`model,effectiveDate,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok` — and
+buildContext prices each event on the card in force on its own day (event.ts) via
+priceTokensOn/cardEffectiveOn.
+
+The overlay is deliberately ADDITIVE, not a replacement: a model absent from the CSV is
+priced from its flat prices.json card exactly as before, so shipping the feature changes no
+existing number (the bundled overlay only lists gpt-4o, whose latest row equals its
+prices.json card). It reuses every prices.json discipline: same $/MTok decimal strings and
+exact money parser, same longest-prefix model matching (history is keyed by the matched id),
+same bundled/user/env precedence ($VIBEBILL_PRICE_HISTORY > <configDir>/vibebill/price-history.csv
+> bundled) and the same SEA-global embedding. Two honesty rules: a row that fails to parse is
+dropped with a warning (never guessed), and an event dated before a model's earliest known
+row is priced at that earliest rate with one aggregated per-model warning ("clamped"), rather
+than invented or dropped. A missing CSV is not an error — it simply disables the feature.
+
+Reprice/summary/log/doctor still match on the CURRENT card by design: repricing asks "what
+would this traffic cost on model X" and the sensible default is X's present price, not a
+date-varying one. Only the primary ledger in context.ts is date-aware.

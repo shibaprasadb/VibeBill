@@ -23,6 +23,7 @@ import type { AgentId } from '../../core/types.js';
 import { totalTokens } from '../../core/types.js';
 import { isShallowRepository, resolveRepoRoot } from '../../git/index.js';
 import { loadEffectivePrices, matchModel } from '../../pricing/engine.js';
+import { loadEffectivePriceHistory } from '../../pricing/history.js';
 import { c } from '../../render/table.js';
 import { cacheDirFor, makeAdapters, type GlobalFlags } from '../context.js';
 import type { CliIO } from '../io.js';
@@ -56,7 +57,9 @@ function adapterRoot(id: AgentId, repoRoot: string | null): string {
     case 'gemini-cli':
       return process.env['VIBEBILL_GEMINI_DIR'] ?? path.join(os.homedir(), '.gemini');
     case 'aider':
-      return repoRoot === null ? '(needs a git repo)' : path.join(repoRoot, '.aider.chat.history.md');
+      return repoRoot === null
+        ? '(needs a git repo)'
+        : path.join(repoRoot, '.aider.chat.history.md');
   }
 }
 
@@ -126,13 +129,30 @@ export async function runDoctor(flags: GlobalFlags, io: CliIO): Promise<number> 
     status: 'ok',
     detail: `asOf ${prices.table.asOf} (${prices.origin}), ${Object.keys(prices.table.models).length} model prefixes`,
     ...(prices.origin === 'bundled'
-      ? { remedy: 'Optionally run any command with --refresh-pricing for the newest community table.' }
+      ? {
+          remedy:
+            'Optionally run any command with --refresh-pricing for the newest community table.',
+        }
       : {}),
   });
   for (const w of prices.warnings) checks.push({ name: 'pricing', status: 'warn', detail: w });
 
+  const history = loadEffectivePriceHistory();
+  const historyModels = history.history.size;
+  checks.push({
+    name: 'dynamic pricing',
+    status: 'ok',
+    detail:
+      historyModels === 0
+        ? `no price history overlay (${history.origin}) — every model priced from its flat card`
+        : `date-aware pricing for ${historyModels} model(s) (${history.origin})`,
+  });
+  for (const w of history.warnings)
+    checks.push({ name: 'dynamic pricing', status: 'warn', detail: w });
+
   // --- adapters: discovery + dry ingest --------------------------------------
-  const adapterIds = config?.adapters ?? (['claude-code', 'codex', 'gemini-cli', 'aider'] as AgentId[]);
+  const adapterIds =
+    config?.adapters ?? (['claude-code', 'codex', 'gemini-cli', 'aider'] as AgentId[]);
   const adapterReports: Array<Record<string, unknown>> = [];
   let ingest: IngestResult | null = null;
 
@@ -165,10 +185,14 @@ export async function runDoctor(flags: GlobalFlags, io: CliIO): Promise<number> 
         detail:
           files.length > 0
             ? `${files.length} transcript file${files.length === 1 ? '' : 's'} (${formatBytes(bytes)}${dateRange}) under ${root}` +
-              (verified ? '' : ' — format implemented from source research, not yet verified on this machine')
+              (verified
+                ? ''
+                : ' — format implemented from source research, not yet verified on this machine')
             : `no transcripts found under ${root}`,
         ...(files.length === 0
-          ? { remedy: `Fine if you don't use ${adapter.id}; otherwise check the path or its VIBEBILL_*_DIR override.` }
+          ? {
+              remedy: `Fine if you don't use ${adapter.id}; otherwise check the path or its VIBEBILL_*_DIR override.`,
+            }
           : {}),
       });
       adapterReports.push({
@@ -201,7 +225,10 @@ export async function runDoctor(flags: GlobalFlags, io: CliIO): Promise<number> 
         (coverage === null ? '' : ` (${coverage}% coverage)`) +
         `, ${s.duplicatesRemoved} duplicates removed`,
       ...(s.linesSkipped > 0
-        ? { remedy: 'Some lines did not match the known format — please report a sample via a GitHub issue.' }
+        ? {
+            remedy:
+              'Some lines did not match the known format — please report a sample via a GitHub issue.',
+          }
         : {}),
     });
     checks.push({
@@ -230,7 +257,11 @@ export async function runDoctor(flags: GlobalFlags, io: CliIO): Promise<number> 
         remedy: 'Try --refresh-pricing, or contribute a price-table PR.',
       });
     } else {
-      checks.push({ name: 'unknown models', status: 'ok', detail: 'every model in scope has a price' });
+      checks.push({
+        name: 'unknown models',
+        status: 'ok',
+        detail: 'every model in scope has a price',
+      });
     }
     jsonExtras['unknownModels'] = [...unknown.keys()].sort();
 

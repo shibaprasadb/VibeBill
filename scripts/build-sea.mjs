@@ -43,13 +43,17 @@ mkdirSync(outDir, { recursive: true });
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 const prices = readFileSync(path.join(root, 'prices', 'prices.json'), 'utf8');
 JSON.parse(prices); // fail fast on a corrupt table rather than baking it in
+const priceHistoryPath = path.join(root, 'prices', 'price-history.csv');
+const priceHistory = existsSync(priceHistoryPath) ? readFileSync(priceHistoryPath, 'utf8') : '';
 
 // 1. Bundle to a single CJS file. import.meta.url is rewritten to a shim
-//    declared in the banner; the banner also embeds version + price table
-//    (a SEA binary has no package.json or prices.json on disk).
+//    declared in the banner; the banner also embeds version + price table +
+//    price-history overlay (a SEA binary has no package.json, prices.json, or
+//    price-history.csv on disk).
 const banner = [
   `globalThis.__vibebillVersion = ${JSON.stringify(pkg.version)};`,
   `globalThis.__vibebillBundledPrices = ${prices};`,
+  `globalThis.__vibebillBundledPriceHistory = ${JSON.stringify(priceHistory)};`,
   `const __VIBEBILL_IMU__ = require('node:url').pathToFileURL(__filename).href;`,
 ].join('\n');
 const bundle = path.join(outDir, 'bundle.cjs');

@@ -32,7 +32,13 @@ import type {
 } from '../core/types.js';
 import { addTokenCounts, totalTokens, ZERO_TOKENS } from '../core/types.js';
 import { enumerateCommits, resolveRepoRoot, revList } from '../git/index.js';
-import { loadEffectivePrices, priceTokens, type PriceTable } from '../pricing/engine.js';
+import {
+  loadEffectivePrices,
+  matchModel,
+  priceTokensOn,
+  type PriceTable,
+} from '../pricing/engine.js';
+import { loadEffectivePriceHistory, type PriceHistory } from '../pricing/history.js';
 
 /** Parsed global flags shared by every command (spec §6). */
 export interface GlobalFlags {
@@ -85,6 +91,8 @@ export interface CliContext {
   plan: PlanId | null;
   flags: GlobalFlags;
   prices: { table: PriceTable; origin: 'bundled' | 'refreshed'; path: string };
+  /** Date-aware price overlay applied to the ledger (spec §5.5); empty when none. */
+  priceHistory: PriceHistory;
   /** Full commit enumeration (HEAD or --all-refs), newest first. */
   commits: CommitInfo[];
   commitByHash: Map<string, CommitInfo>;
@@ -217,6 +225,9 @@ export async function buildContext(
   const prices = loadEffectivePrices();
   warnings.push(...prices.warnings);
 
+  const priceHistory = loadEffectivePriceHistory();
+  warnings.push(...priceHistory.warnings);
+
   const adapters = makeAdapters(config.adapters, repoRoot);
   const [ingest, commits] = await Promise.all([
     ingestEvents({ repoRoot, adapters, cacheDir: cacheDirFor(repoRoot) }),
@@ -245,16 +256,30 @@ export async function buildContext(
     toRepoRelative,
   });
 
+  // Models priced with the earliest known rate because an event predated all of
+  // its history — tallied once per model for a single honest warning (spec §5.5).
+  const clampedByModel = new Map<string, number>();
   const rows: LedgerRow[] = ingest.events.map((event, i) => {
     const a = attributed[i];
     if (a === undefined) {
       // attributeEvents returns an array parallel to its input; this is unreachable.
       throw new Error('attribution result shorter than event list');
     }
+    // Date-aware: price each event on the card in force on its own day (event.ts).
+    const priced = priceTokensOn(
+      prices.table,
+      priceHistory.history,
+      event.model,
+      event.tokens,
+      event.ts,
+    );
+    if (priced?.clamped === true) {
+      clampedByModel.set(event.model, (clampedByModel.get(event.model) ?? 0) + 1);
+    }
     const entry: LedgerEntry = {
       event,
       attribution: a.attribution,
-      cost: priceTokens(prices.table, event.model, event.tokens),
+      cost: priced?.cost ?? null,
       provenance: provenanceFor(a),
     };
     return {
@@ -263,6 +288,16 @@ export async function buildContext(
       inProgress: isInProgress(event, a.attribution, newestCommitAuthorTs),
     };
   });
+
+  // One aggregated notice per model whose oldest history row was clamped in.
+  for (const [model, count] of [...clampedByModel.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const id = matchModel(prices.table, model)?.id ?? model;
+    const earliest = priceHistory.history.get(id)?.[0]?.effectiveDate;
+    warnings.push(
+      `price history for ${JSON.stringify(model)} begins ${earliest ?? '(unknown)'}; ` +
+        `${count} event(s) dated earlier were priced at that earliest known rate`,
+    );
+  }
 
   // Aggregated unknown-model warning, once per distinct model (spec §1.6, §5.5).
   const unknown = new Map<string, { events: number; tokens: number }>();
@@ -287,6 +322,7 @@ export async function buildContext(
     plan: flags.plan ?? config.plan,
     flags,
     prices: { table: prices.table, origin: prices.origin, path: prices.path },
+    priceHistory: priceHistory.history,
     commits,
     commitByHash,
     newestCommitAuthorTs,

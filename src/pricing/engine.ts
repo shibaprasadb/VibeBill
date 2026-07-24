@@ -13,11 +13,8 @@ import { fileURLToPath } from 'node:url';
 import type { MoneyBreakdown, TokenCounts } from '../core/types.js';
 import { CliUserError, InternalError } from '../core/errors.js';
 import { convertLiteLLMTable } from './convert.js';
-import {
-  costBreakdown,
-  parsePriceToNanoPerMTok,
-  type PriceCardNano,
-} from './money.js';
+import { cardEffectiveOn, type PriceHistory } from './history.js';
+import { costBreakdown, parsePriceToNanoPerMTok, type PriceCardNano } from './money.js';
 import { parsePriceTable } from './schema.js';
 
 /** One model's prices as decimal strings in $/MTok (spec §5.5). */
@@ -133,7 +130,12 @@ export function loadEffectivePrices(opts?: { configDir?: string }): {
     try {
       const raw = JSON.parse(readFileSync(userPath, 'utf8')) as unknown;
       const parsed = parsePriceTable(raw, `refreshed ${userPath}`);
-      return { table: parsed.table, origin: 'refreshed', path: userPath, warnings: parsed.warnings };
+      return {
+        table: parsed.table,
+        origin: 'refreshed',
+        path: userPath,
+        warnings: parsed.warnings,
+      };
     } catch (err) {
       warnings.push(
         `refreshed price table at ${userPath} is invalid (${err instanceof Error ? err.message : String(err)}); ` +
@@ -195,6 +197,35 @@ export function priceTokens(
   const match = matchModel(table, rawModel);
   if (match === null) return null;
   return costBreakdown(tokens, resolveCard(match.card).nano);
+}
+
+/** Priced event carrying the dynamic-pricing context (spec §5.5). */
+export interface PricedEvent {
+  cost: MoneyBreakdown;
+  /** The dated history row that applied, or null when the flat prices.json card was used. */
+  effectiveDate: string | null;
+  /** True when the event predated all history and the earliest rate was clamped in. */
+  clamped: boolean;
+}
+
+/**
+ * Date-aware pricing (spec §5.5): price one event's tokens using the card that
+ * was in force for its model on the event's own day (`atMs`, UTC epoch ms).
+ * Falls back to the flat prices.json card when the model has no dated history,
+ * so it is a drop-in superset of priceTokens. null when the model is unknown.
+ */
+export function priceTokensOn(
+  table: PriceTable,
+  history: PriceHistory,
+  rawModel: string,
+  tokens: TokenCounts,
+  atMs: number,
+): PricedEvent | null {
+  const match = matchModel(table, rawModel);
+  if (match === null) return null;
+  const effective = cardEffectiveOn(history, match.id, match.card, atMs);
+  const cost = costBreakdown(tokens, resolveCard(effective.card).nano);
+  return { cost, effectiveDate: effective.effectiveDate, clamped: effective.clamped };
 }
 
 /**

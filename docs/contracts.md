@@ -222,9 +222,29 @@ export function matchModel(table: PriceTable, rawModel: string): { id: string; c
 export function resolveCard(card: PriceCard): { nano: PriceCardNano; cacheFallback: boolean };
 /** Price one event's tokens; null when model unknown (caller records the unknown model). */
 export function priceTokens(table: PriceTable, rawModel: string, tokens: TokenCounts): MoneyBreakdown | null;
+/** Date-aware pricing (§5.5): price on the card in force for the model on the event's day. */
+export function priceTokensOn(table: PriceTable, history: PriceHistory, rawModel: string, tokens: TokenCounts, atMs: number): { cost: MoneyBreakdown; effectiveDate: string | null; clamped: boolean } | null;
 /** THE ONLY NETWORK CALL: fetch LiteLLM table, convert, validate, write user table. */
 export async function refreshPricing(opts?: { configDir?: string; fetchImpl?: typeof fetch }): Promise<{ path: string; asOf: string; modelCount: number }>;
 ```
+
+### `src/pricing/history.ts`
+```ts
+/** A model's price card plus the UTC day it took effect. */
+export interface DatedPriceCard { effectiveDate: string; effectiveMs: number; card: PriceCard; }
+/** model-id -> its dated cards, sorted ascending by effectiveMs (spec §5.5). */
+export type PriceHistory = Map<string, DatedPriceCard[]>;
+/** Parse the price-history CSV; never throws — bad rows are dropped and reported. */
+export function parsePriceHistory(csv: string, sourceLabel: string): { history: PriceHistory; warnings: string[] };
+/** The card in force for a model at a moment; falls back to staticCard when no history, clamps to the earliest row (flagged) when the event predates all history. */
+export function cardEffectiveOn(history: PriceHistory, modelId: string, staticCard: PriceCard, atMs: number): { card: PriceCard; effectiveDate: string | null; clamped: boolean };
+/** Effective overlay with precedence $VIBEBILL_PRICE_HISTORY > <configDir>/vibebill/price-history.csv > bundled; a missing/unreadable file yields an empty overlay, never a crash. */
+export function loadEffectivePriceHistory(opts?: { configDir?: string }): { history: PriceHistory; origin: 'bundled' | 'user' | 'env' | 'none'; path: string; warnings: string[] };
+```
+The overlay is purely additive: a model absent from the CSV is priced from its flat
+prices.json card, so dynamic pricing changes nothing until a dated row is added. Prices use
+the same `$/MTok` decimal strings and exact parser as prices.json; unparseable rows are
+dropped with a warning, never guessed.
 Conversion in refreshPricing mirrors the build-time conversion (per-token → $/MTok decimal
 strings, models absent omitted); include Anthropic/OpenAI/Gemini/DeepSeek/Qwen-coder sets.
 On any error: throw CliUserError with "kept last known table (asOf ...)" wording handled

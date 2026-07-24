@@ -3,6 +3,23 @@
 All notable changes to vibebill are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow semver.
 
+## [Unreleased]
+
+### Added
+
+- **Dynamic (date-aware) pricing.** A new bundled overlay,
+  `prices/price-history.csv`, records the dates a model's `$/MTok` price changed
+  (one row per change: `model,effectiveDate,inputPerMTok,outputPerMTok,cacheWritePerMTok,cacheReadPerMTok`).
+  Each usage event is now priced on the card that was in force **on its own day**
+  rather than one flat current rate. The overlay is additive — a model absent
+  from it is priced from its flat `prices.json` card, so nothing changes until a
+  dated row is added. It reuses every `prices.json` discipline (exact decimal
+  parser, longest-prefix matching, bundled/user/`$VIBEBILL_PRICE_HISTORY`
+  precedence, SEA embedding); unparseable rows are dropped with a warning, and an
+  event dated before a model's earliest known price is priced at that earliest
+  rate with one aggregated warning. `doctor` reports overlay coverage. Decision
+  D16 in [docs/decisions.md](docs/decisions.md).
+
 ## [0.2.0] — 2026-07-16
 
 First published release. It ships the complete v0.1.0 scope **and** the v0.2 additions as a
